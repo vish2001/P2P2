@@ -2,13 +2,12 @@
 #include <Arduino.h>
 
 // =============================================================================
-// PEER-TO-PEER UWB MESH SYSTEM - SCALABLE CONFIGURATION
+// PEER-TO-PEER UWB RANGING CONFIGURATION
 // =============================================================================
-// ALL NODES ARE IDENTICAL PEERS. No anchors, no tags, no coordinator.
-// Positions are computed as RELATIVE coordinates within the mesh.
+// ALL NODES ARE IDENTICAL PEERS. Each node acts as both initiator and responder, ranging with neighbors in a TDMA schedule.
 // =============================================================================
 
-// --- Hardware Pin Mapping (ESP32 + DW3000) ---
+// --- Hardware Pin Mapping (ESP32 + DW3000) --- According to the custom PCB design.
 #define PIN_RST   27
 #define PIN_CS     4
 #define PIN_IRQ   34
@@ -17,9 +16,6 @@
 #define PIN_MOSI  23
 #define LED_PIN    2
 
-// =============================================================================
-// NODE IDENTITY - AUTO-ADDRESSING
-// =============================================================================
 // TAG_ID is generated automatically from MAC address at startup.
 // Can be overridden via build flags for testing: -DTAG_ID_OVERRIDE=X
 #ifndef TAG_ID_OVERRIDE
@@ -29,26 +25,6 @@
 // Global variable declaration (defined in main.cpp)
 extern uint8_t TAG_ID;
 
-// =============================================================================
-// BATTERY MONITORING  (3.7V single-cell LiPo)
-// =============================================================================
-// Connect battery through a voltage divider to an ADC-capable GPIO:
-//   VBAT ---[R1=100K]---+---[R2=100K]--- GND
-//                        |
-//                      ADC_PIN
-//
-// With 100K/100K divider: ratio = 2.0, so 4.2V bat → 2.1V ADC, 3.0V → 1.5V
-// If using different resistors, adjust VBAT_DIVIDER_RATIO accordingly.
-// Set BATTERY_MONITOR_ENABLED to 0 if no divider is wired up.
-
-#define BATTERY_MONITOR_ENABLED  1
-#define VBAT_ADC_PIN            35       // GPIO35 (ADC1_CH7) — input-only, safe choice
-#define VBAT_DIVIDER_RATIO      2.0f     // R1=R2=100K → ratio = (R1+R2)/R2 = 2.0
-#define VBAT_CHECK_INTERVAL_MS  30000    // Check every 30 seconds
-#define VBAT_WARN_VOLTAGE       3.30f    // Start warning (send alert packet)
-#define VBAT_CRITICAL_VOLTAGE   3.00f    // Safe shutdown — protect the cell
-#define VBAT_SHUTDOWN_COUNT     3        // Require N consecutive critical reads before shutdown
-#define VBAT_ADC_SAMPLES        16       // Oversample for noise reduction
 
 // =============================================================================
 // COMMUNICATION SELECTION
@@ -59,8 +35,8 @@ extern uint8_t TAG_ID;
 // =============================================================================
 // ESP-NOW CONFIGURATION
 // =============================================================================
-#define BASE_STATION_MAC     {0xA8, 0x03, 0x2A, 0xF7, 0x0C, 0x88}
-#define ESP_NOW_MIN_INTERVAL 100
+#define BASE_STATION_MAC     {0xA8, 0x03, 0x2A, 0xF7, 0x0C, 0x88}   // MAC address of the base station (for ESP-NOW communication)
+#define ESP_NOW_MIN_INTERVAL 100 // Minimum interval between ESP-NOW sends (ms) to prevent congestion
 
 // =============================================================================
 // WIFI UDP CONFIGURATION (used when WIFI_ENABLED=1)
@@ -87,12 +63,6 @@ extern uint8_t TAG_ID;
 #define REDUCE_CPU_FREQ      1
 #define CPU_FREQ_HIGH        240    // Only during UWB TX/RX critical sections
 #define CPU_FREQ_NORMAL      80     // Main loop (was 160 — 80 is fine for state machine)
-#define CPU_FREQ_LOW         80
-
-// WiFi modem sleep: nodes only SEND via ESP-NOW, never receive.
-// Radio can sleep between burst sends.
-#define ESPNOW_MODEM_SLEEP   1      // Enable WiFi modem sleep
-#define ESPNOW_BURST_INTERVAL_MS  2500  // Queue packets, burst-send every 2.5s
 
 // Production mode: suppress serial debug output for power saving
 #ifndef PRODUCTION_MODE
@@ -107,7 +77,7 @@ extern uint8_t TAG_ID;
 #define NUM_SLOTS            23       // Prime, suits 10 nodes with headroom
 
 // --- Power saving: range every Nth frame ---
-// Node still LISTENS and RESPONDS every frame (stays in mesh).
+// Node still LISTENS and RESPONDS every frame .
 // Only INITIATES ranging every Nth frame to reduce TX power.
 //   1 = range every frame  (max accuracy, ~575ms updates)
 //   2 = range every 2nd    (~1.15s updates, ~10% battery saving)
@@ -118,7 +88,7 @@ extern uint8_t TAG_ID;
 #define MIN_SLOT_MS          25
 
 // Frame timing derived from physics
-#define SLOT_LENGTH_MS       MIN_SLOT_MS
+#define SLOT_LENGTH_MS       MIN_SLOT_MS // ms per slot (must accommodate the entire DS-TWR exchange)
 #define FRAME_LENGTH_MS      (NUM_SLOTS * SLOT_LENGTH_MS)  // 575ms with 23 slots
 
 // Slot ownership computed at runtime (TAG_ID is variable)
@@ -127,45 +97,59 @@ extern uint8_t TAG_ID;
 // =============================================================================
 // COLLISION MITIGATION
 // =============================================================================
-#define SLOT_JITTER_MAX_MS   8
+
+// Random jitter added before each TX as a secondary collision mitigation
+// mechanism alongside LBT. Even with TDMA, two nodes
+// with the same hash slot would collide every frame without this jitter.
+// 8ms fits within the 25ms slot without affecting the DS-TWR exchange.
+#define SLOT_JITTER_MAX_MS   8 
+
+// Backoff duration if LBT detects a busy channel. Combined with exponential retry (up to 3 attempts at 10-50ms)
 #define COLLISION_BACKOFF_MS 50
 
 // =============================================================================
 // HELLO BEACON PARAMETERS
 // =============================================================================
-#define HELLO_INTERVAL_MS    3000
-#define HELLO_FRAME_TYPE     0xAA
-#define NEIGHBOR_TIMEOUT_MS  15000
-#define HELLO_JITTER_MS      500
+#define HELLO_INTERVAL_MS    3000 // Minimum interval between HELLO beacons from the same node (ms)
+#define NEIGHBOR_TIMEOUT_MS  15000  // If no HELLO is received for 15 seconds (= 5 missed beacons) the neighbour is removed.
+#define HELLO_JITTER_MS      500 // spread beacons to reduce simultaneous TX
 
 // =============================================================================
 // FRAME SYNCHRONIZATION
 // =============================================================================
-#define SYNC_TO_LOWER_ID     1
+// When two nodes hear each other's HELLOs, the one with the higher TAG_ID
+// adjusts its frame start to align with the lower ID. This loose sync reduces
+// inter-slot interference without needing a dedicated sync master.
+// The holdoff prevents rapid re-syncing during startup.
+#define SYNC_TO_LOWER_ID     1  
 #define SYNC_HOLDOFF_MS      5000
 
 // =============================================================================
 // NEIGHBOR MANAGEMENT
 // =============================================================================
-#define MAX_NEIGHBORS        16       // Enough for 10 nodes + headroom
-#define K_NEIGHBORS          6
-#define MIN_HELLO_COUNT      2
-
-// Bridge detection (for prioritizing long-distance mesh links)
-#define CLUSTER_DISTANCE_THRESHOLD_CM  1500
-#define BRIDGE_LINK_PRIORITY_BOOST     50.0
+#define MAX_NEIGHBORS        16       // 16 slots is enough for 10 nodes with headroom for future expansion.
+#define MIN_HELLO_COUNT      2 // Only consider nodes we've heard at least 2 HELLOs from (to filter out transient noise),is added to the neighbour table. This prevents false entries from stray packets during startup .
+#define CLUSTER_DISTANCE_THRESHOLD_CM  1500 // Neighbours measured beyond this distance are treated as potential bridge links, changed according to the space requirements. 
+#define BRIDGE_LINK_PRIORITY_BOOST     50.0 //adds 50 points to the priority score of a long-range neighbour, making it more likely to be selected as a ranging target to preserve connectivity across larger spaces.
 
 // =============================================================================
 // CONNECTIVITY PRESERVATION
 // =============================================================================
 // Range with ALL neighbors to maintain mesh connectivity
 #define RANGE_ALL_NEIGHBORS  1
+// Stale long-range links are ranged first because they are likely bridge
+// edges — removing them could split the mesh into disconnected sub-groups.
 #define STALE_LINK_PRIORITY  100.0
+// LINK_STALE_THRESHOLD_MS=10s means a link is considered stale if no
+// successful range has happened in the last 10 seconds.
 #define LINK_STALE_THRESHOLD_MS  10000
 
 // =============================================================================
 // DS-TWR PROTOCOL
 // =============================================================================
+// The four-message DS-TWR exchange uses these stage numbers in the frame
+// payload so each node knows which part of the handshake it is in.
+// STAGE_ERROR=7 is reserved for the error frame that aborts a failed exchange.
 #define DS_TWR_FRAME_TYPE    0x01
 #define RESPONSE_TIMEOUT_MS  35
 #define MAX_RANGING_RETRIES  2
@@ -179,6 +163,11 @@ extern uint8_t TAG_ID;
 // =============================================================================
 // LISTEN-BEFORE-TALK
 // =============================================================================
+// Before transmitting a POLL the node listens for 5ms. If the channel is
+// already active it backs off and retries up to 3 times with exponential
+// backoff (10–50ms). This is a second layer of collision protection on top
+// of TDMA, needed because the barn metal environment causes multipath that
+// can make a slot appear busy even when it isn't.
 #define LBT_ENABLED          1
 #define LBT_LISTEN_MS        5
 #define LBT_BACKOFF_BASE_MS  10
@@ -188,17 +177,17 @@ extern uint8_t TAG_ID;
 // =============================================================================
 // DISTANCE FILTERING
 // =============================================================================
-#define FILTER_SIZE          7
-#define MIN_DISTANCE_CM      10.0
-#define MAX_DISTANCE_CM      10000.0
+#define FILTER_SIZE          7 //rolling median over 7 samples smooths impulse noise
+#define MIN_DISTANCE_CM      10.0 // Filter out measurements below 10cm (likely reflections or errors)
+#define MAX_DISTANCE_CM      10000.0 // 100m max range for DW3000, filter outliers beyond this range
 #define MAX_ACCEPT_DISTANCE_CM  3000.0   // Ignore measurements beyond 30m (less reliable)
-#define OUTLIER_THRESHOLD    200.0
-#define EMA_ALPHA            0.3
+#define OUTLIER_THRESHOLD    200.0 // Reject measurements that deviate from the median by more than 2m
+#define EMA_ALPHA            0.3 // exponential moving average with alpha=0.3 forgentle tracking of slow node movement
 
 // =============================================================================
 // LOGGING & DEBUG
 // =============================================================================
-#define LOG_BUFFER_SIZE      32
+#define RANGE_LOG_BUFFER_SIZE      32 // Size of the circular ring buffer in range_logger.
 #define SERIAL_BAUD          921600
 
 #ifndef DEBUG_OUTPUT
@@ -213,6 +202,11 @@ extern uint8_t TAG_ID;
 // =============================================================================
 // DW3000 RADIO CONSTANTS
 // =============================================================================
+// NS_UNIT and PS_UNIT convert raw DW3000 timestamp ticks to nanoseconds and
+// picoseconds respectively. The DW3000 runs a 64GHz clock internally — each
+// tick is ~15.65ps. SPEED_OF_LIGHT is in m/ps, used in the ToF→distance
+// conversion: distance_m = tof_ticks × PS_UNIT × SPEED_OF_LIGHT
+
 #define LEN_RX_CAL_CONF 4
 #define LEN_TX_FCTRL_CONF 6
 #define LEN_AON_DIG_CFG_CONF 3
@@ -227,6 +221,7 @@ extern uint8_t TAG_ID;
 #define SYS_STATUS_RX_ERR 0x4279000
 #define SYS_STATUS_FRAME_TX_SUCC 0x80
 
+// Radio config options — passed to DW3000Class::config[] during init
 #define PREAMBLE_32 4
 #define PREAMBLE_64 8
 #define PREAMBLE_128 5
@@ -254,6 +249,7 @@ extern uint8_t TAG_ID;
 #define PHR_RATE_6_8MB 0x1
 #define PHR_RATE_850KB 0x0
 
+// DW3000 status/config bitmasks
 #define SPIRDY_MASK 0x80
 #define RCINIT_MASK 0x100
 #define BIAS_CTRL_BIAS_MASK 0x1F
@@ -291,7 +287,7 @@ extern uint8_t TAG_ID;
 
 #define NS_UNIT 4.0064102564102564
 #define PS_UNIT 15.6500400641025641
-#define SPEED_OF_LIGHT 0.029979245800
+#define SPEED_OF_LIGHT 0.029979245800 // m/ps
 
 #define CLOCK_OFFSET_CHAN_5_CONSTANT -0.5731e-3f
 #define CLOCK_OFFSET_CHAN_9_CONSTANT -0.1252e-3f

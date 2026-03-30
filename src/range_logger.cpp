@@ -69,27 +69,20 @@ void RangeLogger::logFailure(uint8_t initiator, uint8_t responder,
     }
 }
 
-void RangeLogger::logHello(uint8_t sender_id, uint8_t seq_num) {
-    if (verbose_mode) {
-        Serial.print("[HELLO] From ");
-        Serial.print(sender_id);
-        Serial.print(" seq=");
-        Serial.println(seq_num);
-    }
-}
+
 
 // =============================================================================
 // BUFFER MANAGEMENT
 // =============================================================================
 void RangeLogger::addEntry(const RangeLogEntry& entry) {
     buffer[write_index] = entry;
-    write_index = (write_index + 1) % LOG_BUFFER_SIZE;
+    write_index = (write_index + 1) % RANGE_LOG_BUFFER_SIZE;
     
-    if (count < LOG_BUFFER_SIZE) {
+    if (count < RANGE_LOG_BUFFER_SIZE) {
         count++;
     } else {
         // Buffer full, overwrite oldest
-        read_index = (read_index + 1) % LOG_BUFFER_SIZE;
+        read_index = (read_index + 1) % RANGE_LOG_BUFFER_SIZE;
     }
 }
 
@@ -103,7 +96,7 @@ uint8_t RangeLogger::getBufferedCount() {
 void RangeLogger::flushToSerial() {
     while (count > 0) {
         printEntry(buffer[read_index]);
-        read_index = (read_index + 1) % LOG_BUFFER_SIZE;
+        read_index = (read_index + 1) % RANGE_LOG_BUFFER_SIZE;
         count--;
     }
 }

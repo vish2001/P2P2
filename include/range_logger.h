@@ -35,8 +35,6 @@ public:
     void logFailure(uint8_t initiator, uint8_t responder, 
                     uint16_t frame, const char* reason);
     
-    // Log a HELLO beacon event
-    void logHello(uint8_t sender_id, uint8_t seq_num);
     
     // --- Output ---
     // Flush buffered logs to Serial (CSV format)
@@ -53,7 +51,7 @@ public:
     void setJsonOutput(bool json);
 
 private:
-    RangeLogEntry buffer[LOG_BUFFER_SIZE];
+    RangeLogEntry buffer[RANGE_LOG_BUFFER_SIZE];
     uint8_t write_index;
     uint8_t read_index;
     uint8_t count;

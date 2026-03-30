@@ -93,10 +93,10 @@ struct RangingSession {
     uint32_t  t_reply_b;
     uint32_t  report_t_round_b;
     uint32_t  report_t_reply_b;
-} session;
+} ranging_session;
 
-uint8_t hello_seq   = 0;
-uint8_t lbt_retries = 0;
+uint8_t hello_sequence_num   = 0;
+uint8_t lbt_retry_count = 0;
 
 #define BROADCAST_ID 0xFF
 
@@ -108,7 +108,7 @@ static uint32_t last_range_success_ms = 0;
 // =============================================================================
 
 BMI270 imu;
-bool imu_ok = false;
+bool imu_available = false;
 
 static float buf_ax[SAMPLES_PER_WIN], buf_ay[SAMPLES_PER_WIN], buf_az[SAMPLES_PER_WIN];
 static float buf_gx[SAMPLES_PER_WIN], buf_gy[SAMPLES_PER_WIN], buf_gz[SAMPLES_PER_WIN];
@@ -117,30 +117,20 @@ static int      buf_count = 0;
 static int      new_samples = 0;
 static uint32_t last_sample_ms = 0;
 
-static CattleVoter voter;
+static CattleVoter behaviour_voter;
 static int   current_behavior   = -1;
 static int   current_confidence = 0;
 static float latest_ax = 0, latest_ay = 0, latest_az = 0;
 static float latest_gx = 0, latest_gy = 0, latest_gz = 0;
 
-// =============================================================================
-// GLOBAL STATE — BATTERY MONITOR
-// =============================================================================
-#if BATTERY_MONITOR_ENABLED
-static float    battery_voltage     = 4.2f;  // Assume full until first read
-static uint32_t last_batt_check_ms  = 0;
-static uint8_t  critical_count      = 0;     // Consecutive critical readings
-static bool     battery_warned      = false;
-static bool     battery_shutdown    = false;
-#endif
 
 // =============================================================================
 // FORWARD DECLARATIONS
 // =============================================================================
 void initializeUWB();
 void initializeIMU();
-void resetRadio();
-void hardResetDW();
+
+void hardResetUWB();
 void generateNodeID();
 bool performLBT();
 bool checkStateTimeout(uint32_t timeout_ms);
@@ -150,11 +140,6 @@ void enterListeningMode();
 void sampleIMU();
 void runClassification();
 
-#if BATTERY_MONITOR_ENABLED
-float readBatteryVoltage();
-void  checkBattery();
-void  batteryShutdown(float voltage);
-#endif
 
 void handleListeningState();
 void handleInitSendPoll();
@@ -214,7 +199,7 @@ void initializeIMU() {
     Wire.setClock(400000);
 
     if (imu.beginI2C(BMI2_I2C_PRIM_ADDR) == BMI2_OK) {
-        imu_ok = true;
+        imu_available = true;
         Serial.println("[IMU] BMI270 OK");
 
         int pass = cc_selftest();
@@ -223,10 +208,10 @@ void initializeIMU() {
         imu.getSensorData();
         Serial.printf("[IMU] az = %.2f m/s2\n", imu.data.accelZ * G_TO_MS2);
     } else {
-        imu_ok = false;
+        imu_available = false;
         Serial.println("[IMU] BMI270 not found — classification disabled, UWB continues");
     }
-    cc_voter_init(&voter);
+    cc_voter_init(&behaviour_voter);
 }
 
 // =============================================================================
@@ -235,7 +220,7 @@ void initializeIMU() {
 // DW3000 SPI timestamps during active DS-TWR exchanges.
 // =============================================================================
 void sampleIMU() {
-    if (!imu_ok) return;
+    if (!imu_available) return;
     uint32_t now = millis();
     if (now - last_sample_ms < SAMPLE_INTERVAL) return;
     last_sample_ms = now;
@@ -278,17 +263,17 @@ void runClassification() {
         win_gx[i] = buf_gx[idx]; win_gy[i] = buf_gy[idx]; win_gz[i] = buf_gz[idx];
     }
 
-    // cc_classify handles: extract → select → scale → MLP → voter
+    // cc_classify handles: extract → select → scale → MLP → behaviour_voter
     int raw_pred = -1;
     int smoothed = cc_classify(win_ax, win_ay, win_az,
                                win_gx, win_gy, win_gz,
-                               &voter, &raw_pred);
+                               &behaviour_voter, &raw_pred);
 
-    // Compute confidence from voter history
+    // Compute confidence from behaviour_voter history
     int conf = 0;
-    int vcount = voter.count < CC_VOTE_WINDOW ? voter.count : CC_VOTE_WINDOW;
+    int vcount = behaviour_voter.count < CC_VOTE_WINDOW ? behaviour_voter.count : CC_VOTE_WINDOW;
     for (int i = 0; i < vcount; i++) {
-        if (voter.history[i] == smoothed) conf++;
+        if (behaviour_voter.history[i] == smoothed) conf++;
     }
     current_behavior   = smoothed;
     current_confidence = conf;
@@ -366,9 +351,6 @@ void setup() {
 
     initializeIMU();
     initializeUWB();
-
-    rangeLogger.setVerbose(true);
-    rangeLogger.setJsonOutput(false);
 
     enterListeningMode();
     last_sample_ms = millis();
@@ -523,10 +505,10 @@ void handleListeningState() {
         if ((range_frame_counter % RANGE_EVERY_N_FRAMES) == 0) {
             uint8_t target = neighborTable.getNextRangingTarget();
             if (target != 0) {
-                session.target_id    = target;
-                session.is_initiator = true;
+                ranging_session.target_id    = target;
+                ranging_session.is_initiator = true;
                 retry_count          = 0;
-                lbt_retries          = 0;
+                lbt_retry_count          = 0;
                 Serial.print("[RANGE] -> ");
                 Serial.println(target);
                 transitionTo(NodeState::INIT_SEND_POLL);
@@ -574,9 +556,9 @@ void handleListeningState() {
 
             // Incoming POLL — become responder
             if (stage == STAGE_POLL && (dest_id == TAG_ID || dest_id == BROADCAST_ID)) {
-                session.target_id    = sender_id;
-                session.is_initiator = false;
-                session.rx_poll      = uwb.readRXTimestamp();
+                ranging_session.target_id    = sender_id;
+                ranging_session.is_initiator = false;
+                ranging_session.rx_poll      = uwb.readRXTimestamp();
                 uwb.clearSystemStatus();
                 Serial.print("[POLL] <- ");
                 Serial.println(sender_id);
@@ -604,11 +586,11 @@ void handleInitSendPoll() {
 
 #if LBT_ENABLED
     if (!performLBT()) {
-        lbt_retries++;
-        if (lbt_retries >= LBT_MAX_RETRIES) {
+        lbt_retry_count++;
+        if (lbt_retry_count >= LBT_MAX_RETRIES) {
             Serial.println("[LBT] Busy, abort");
             scheduler.reportCollision();
-            neighborTable.recordCollision(session.target_id);
+            neighborTable.recordCollision(ranging_session.target_id);
             enterListeningMode();
             return;
         }
@@ -619,10 +601,10 @@ void handleInitSendPoll() {
 
     uwb.clearSystemStatus();
     uwb.setSenderID(TAG_ID);
-    uwb.setDestinationID(session.target_id);
+    uwb.setDestinationID(ranging_session.target_id);
     if (REDUCE_CPU_FREQ) setCpuFrequencyMhz(CPU_FREQ_HIGH);
     uwb.ds_sendFrame(STAGE_POLL);
-    session.tx_poll = uwb.readTXTimestamp();
+    ranging_session.tx_poll = uwb.readTXTimestamp();
     transitionTo(NodeState::INIT_WAIT_RESP);
 }
 
@@ -632,8 +614,8 @@ void handleInitWaitResp() {
         if (retry_count < MAX_RANGING_RETRIES) {
             transitionTo(NodeState::INIT_SEND_POLL);
         } else {
-            LOG_RANGE_FAILURE(TAG_ID, session.target_id, scheduler.getFrameNumber(), "RESP_TIMEOUT");
-            neighborTable.recordRangingFailure(session.target_id);
+            LOG_RANGE_FAILURE(TAG_ID, ranging_session.target_id, scheduler.getFrameNumber(), "RESP_TIMEOUT");
+            neighborTable.recordRangingFailure(ranging_session.target_id);
             enterListeningMode();
         }
         return;
@@ -646,9 +628,9 @@ void handleInitWaitResp() {
         uint8_t stage     = uwb.read(RX_BUFFER_0_REG, 0x03) & 0x07;
         unsigned long long rx_ts = uwb.readRXTimestamp();
         uwb.clearSystemStatus();
-        if (mode == 1 && sender_id == session.target_id && stage == STAGE_RESP) {
-            session.rx_resp   = rx_ts;
-            session.t_round_a = session.rx_resp - session.tx_poll;
+        if (mode == 1 && sender_id == ranging_session.target_id && stage == STAGE_RESP) {
+            ranging_session.rx_resp   = rx_ts;
+            ranging_session.t_round_a = ranging_session.rx_resp - ranging_session.tx_poll;
             transitionTo(NodeState::INIT_SEND_FINAL);
         } else {
             uwb.standardRX();
@@ -661,17 +643,17 @@ void handleInitWaitResp() {
 
 void handleInitSendFinal() {
     uwb.setSenderID(TAG_ID);
-    uwb.setDestinationID(session.target_id);
+    uwb.setDestinationID(ranging_session.target_id);
     uwb.ds_sendFrame(STAGE_FINAL);
-    session.tx_final  = uwb.readTXTimestamp();
-    session.t_reply_a = session.tx_final - session.rx_resp;
+    ranging_session.tx_final  = uwb.readTXTimestamp();
+    ranging_session.t_reply_a = ranging_session.tx_final - ranging_session.rx_resp;
     transitionTo(NodeState::INIT_WAIT_REPORT);
 }
 
 void handleInitWaitReport() {
     if (checkStateTimeout(RESPONSE_TIMEOUT_MS)) {
-        LOG_RANGE_FAILURE(TAG_ID, session.target_id, scheduler.getFrameNumber(), "REPORT_TIMEOUT");
-        neighborTable.recordRangingFailure(session.target_id);
+        LOG_RANGE_FAILURE(TAG_ID, ranging_session.target_id, scheduler.getFrameNumber(), "REPORT_TIMEOUT");
+        neighborTable.recordRangingFailure(ranging_session.target_id);
         enterListeningMode();
         return;
     }
@@ -681,10 +663,10 @@ void handleInitWaitReport() {
         uint8_t mode      = uwb.read(RX_BUFFER_0_REG, 0x00) & 0x07;
         uint8_t sender_id = uwb.read(RX_BUFFER_0_REG, 0x01) & 0xFF;
         uint8_t stage     = uwb.read(RX_BUFFER_0_REG, 0x03) & 0x07;
-        if (mode == 1 && sender_id == session.target_id && stage == STAGE_REPORT) {
-            session.report_t_round_b = uwb.read(RX_BUFFER_0_REG, 0x04);
-            session.report_t_reply_b = uwb.read(RX_BUFFER_0_REG, 0x08);
-            session.clock_offset     = uwb.getRawClockOffset();
+        if (mode == 1 && sender_id == ranging_session.target_id && stage == STAGE_REPORT) {
+            ranging_session.report_t_round_b = uwb.read(RX_BUFFER_0_REG, 0x04);
+            ranging_session.report_t_reply_b = uwb.read(RX_BUFFER_0_REG, 0x08);
+            ranging_session.clock_offset     = uwb.getRawClockOffset();
             uwb.clearSystemStatus();
             transitionTo(NodeState::INIT_CALCULATE);
         } else {
@@ -699,36 +681,36 @@ void handleInitWaitReport() {
 
 void handleInitCalculate() {
     int ranging_time = uwb.ds_processRTInfo(
-        session.t_round_a, session.t_reply_a,
-        session.report_t_round_b, session.report_t_reply_b,
-        session.clock_offset
+        ranging_session.t_round_a, ranging_session.t_reply_a,
+        ranging_session.report_t_round_b, ranging_session.report_t_reply_b,
+        ranging_session.clock_offset
     );
 
     float distance_cm = uwb.convertToCM(ranging_time);
     float rssi        = uwb.getSignalStrength();
     float fp_rssi     = uwb.getFirstPathSignalStrength();
 
-    LOG_RANGE_SUCCESS(TAG_ID, session.target_id, distance_cm, rssi, fp_rssi,
+    LOG_RANGE_SUCCESS(TAG_ID, ranging_session.target_id, distance_cm, rssi, fp_rssi,
                       scheduler.getFrameNumber());
-    neighborTable.recordRangingSuccess(session.target_id, distance_cm, rssi);
+    neighborTable.recordRangingSuccess(ranging_session.target_id, distance_cm, rssi);
 
     // Track last successful range for staleness reporting
     last_range_success_ms = millis();
 
-    Neighbor* n = neighborTable.getNeighbor(session.target_id);
+    Neighbor* n = neighborTable.getNeighbor(ranging_session.target_id);
     float filtered_dist = (n && n->filtered_distance_cm > 0)
                           ? n->filtered_distance_cm : distance_cm;
 
 #if ESP_NOW_ENABLED
-    espnowSender.sendRangingResult(TAG_ID, session.target_id, filtered_dist, rssi, millis());
+    espnowSender.sendRangingResult(TAG_ID, ranging_session.target_id, filtered_dist, rssi, millis());
 #elif WIFI_ENABLED
-    wifiSender.sendRangingResult(TAG_ID, session.target_id, filtered_dist, rssi, millis());
+    wifiSender.sendRangingResult(TAG_ID, ranging_session.target_id, filtered_dist, rssi, millis());
 #endif
 
     Serial.print("[DIST] ");
     Serial.print(TAG_ID);
     Serial.print("->");
-    Serial.print(session.target_id);
+    Serial.print(ranging_session.target_id);
     Serial.print(": ");
     Serial.print(distance_cm, 1);
     Serial.print(" cm (filtered: ");
@@ -743,10 +725,10 @@ void handleInitCalculate() {
 // =============================================================================
 void handleRespSendResp() {
     uwb.setSenderID(TAG_ID);
-    uwb.setDestinationID(session.target_id);
+    uwb.setDestinationID(ranging_session.target_id);
     uwb.ds_sendFrame(STAGE_RESP);
-    session.tx_resp   = uwb.readTXTimestamp();
-    session.t_reply_b = session.tx_resp - session.rx_poll;
+    ranging_session.tx_resp   = uwb.readTXTimestamp();
+    ranging_session.t_reply_b = ranging_session.tx_resp - ranging_session.rx_poll;
     transitionTo(NodeState::RESP_WAIT_FINAL);
 }
 
@@ -764,9 +746,9 @@ void handleRespWaitFinal() {
         uint8_t stage     = uwb.read(RX_BUFFER_0_REG, 0x03) & 0x07;
         unsigned long long rx_ts = uwb.readRXTimestamp();
         uwb.clearSystemStatus();
-        if (mode == 1 && sender_id == session.target_id && stage == STAGE_FINAL) {
-            session.rx_final  = rx_ts;
-            session.t_round_b = session.rx_final - session.tx_resp;
+        if (mode == 1 && sender_id == ranging_session.target_id && stage == STAGE_FINAL) {
+            ranging_session.rx_final  = rx_ts;
+            ranging_session.t_round_b = ranging_session.rx_final - ranging_session.tx_resp;
             transitionTo(NodeState::RESP_SEND_REPORT);
         } else {
             uwb.standardRX();
@@ -779,8 +761,8 @@ void handleRespWaitFinal() {
 
 void handleRespSendReport() {
     uwb.setSenderID(TAG_ID);
-    uwb.setDestinationID(session.target_id);
-    uwb.ds_sendRTInfo(session.t_round_b, session.t_reply_b);
+    uwb.setDestinationID(ranging_session.target_id);
+    uwb.ds_sendRTInfo(ranging_session.t_round_b, ranging_session.t_reply_b);
     scheduler.exitRespondingMode();
     enterListeningMode();
 }
@@ -797,9 +779,9 @@ void handleHelloSend() {
     scheduler.markHelloSent();
     if (DEBUG_OUTPUT) {
         Serial.print("[HELLO] seq=");
-        Serial.println(hello_seq);
+        Serial.println(hello_sequence_num);
     }
-    hello_seq++;
+    hello_sequence_num++;
     enterListeningMode();
 }
 
@@ -831,7 +813,7 @@ void enterListeningMode() {
 void initializeUWB() {
     Serial.println("[UWB] Init...");
     uwb.begin();
-    hardResetDW();
+    hardResetUWB();
     delay(200);
 
     if (!uwb.checkSPI()) {
@@ -863,18 +845,8 @@ void initializeUWB() {
     Serial.println("[UWB] Ready");
 }
 
-void resetRadio() {
-    uwb.softReset();
-    delay(100);
-    uwb.init();
-    uwb.setTXAntennaDelay(ANTENNA_DELAY_DEFAULT);
-    uwb.setSenderID(TAG_ID);
-    uwb.clearSystemStatus();
-    uwb.configureAsTX();
-    uwb.standardRX();
-}
 
-void hardResetDW() {
+void hardResetUWB() {
     pinMode(PIN_RST, OUTPUT);
     digitalWrite(PIN_RST, LOW);
     delay(3);
@@ -904,13 +876,13 @@ void printStatus() {
     uint32_t range_age = (last_range_success_ms > 0) ? (millis() - last_range_success_ms) : 0;
     Serial.printf("Last range: %lu ms ago\n", range_age);
 
-    if (imu_ok && current_behavior >= 0) {
+    if (imu_available && current_behavior >= 0) {
         Serial.printf("Behavior: %s (conf %d/3)\n",
                       BEH_NAMES[current_behavior], current_confidence);
         Serial.printf("IMU: ax=%.1f ay=%.1f az=%.1f | gx=%.1f gy=%.1f gz=%.1f\n",
                       latest_ax, latest_ay, latest_az,
                       latest_gx, latest_gy, latest_gz);
-    } else if (!imu_ok) {
+    } else if (!imu_available) {
         Serial.println("IMU: OFFLINE");
     } else {
         Serial.println("Behavior: initializing...");

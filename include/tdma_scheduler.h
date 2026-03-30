@@ -47,21 +47,15 @@ public:
     
     // --- Synchronization ---
     void syncFrameStart(uint32_t new_frame_start);
-    bool isSynced();
     uint32_t getLastSyncTime();
     
     // --- Timing Helpers ---
-    uint32_t timeUntilMySlot();
+ 
     uint16_t getFrameNumber();
-    uint32_t getFrameStart();
-    
+
     // --- Collision Handling ---
     void reportCollision();
-    uint8_t getCollisionBackoff();
-    bool shouldSkipSlot();
     
-    // --- Debug ---
-    void printStatus();
 
 private:
     uint32_t frame_start_ms;

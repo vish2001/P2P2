@@ -30,12 +30,6 @@ struct Neighbor {
     uint8_t slot;
 };
 
-struct SelectedNeighbor {
-    uint8_t id;
-    float priority_score;
-    bool is_stale;
-    bool is_long_range;
-};
 
 struct MeshStats {
     uint32_t total_attempts;
@@ -50,8 +44,6 @@ public:
     
     // HELLO Processing
     void processHello(uint8_t neighbor_id, uint8_t seq_num, uint8_t neighbor_count);
-    void processHelloWithSlot(uint8_t neighbor_id, uint8_t seq_num, 
-                              uint8_t neighbor_count, uint8_t slot_num);
     
     // Ranging Results
     void recordRangingSuccess(uint8_t neighbor_id, float distance_cm, float rssi);
@@ -69,13 +61,12 @@ public:
     const Neighbor* getNeighborArray() const { return neighbors; }  // For iteration
     uint8_t getActiveCount();
     uint8_t getEligibleCount();
-    float getFilteredDistance(uint8_t neighbor_id);
+
     float getSuccessRate(uint8_t neighbor_id);
     bool hasSlotCollision(uint8_t neighbor_id);
     
     // Stats
     MeshStats getStats();
-    void resetStats();
     
     // Debug
     void printTable();

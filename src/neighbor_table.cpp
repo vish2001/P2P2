@@ -61,26 +61,6 @@ void NeighborTable::processHello(uint8_t neighbor_id, uint8_t seq_num, uint8_t n
     }
 }
 
-void NeighborTable::processHelloWithSlot(uint8_t neighbor_id, uint8_t seq_num, 
-                                         uint8_t neighbor_count, uint8_t slot_num) {
-    if (neighbor_id == TAG_ID) return;
-    
-    Neighbor* n = findOrCreate(neighbor_id);
-    if (n == nullptr) return;
-    
-    n->last_hello_time = millis();
-    n->hello_count++;
-    n->slot = slot_num;
-    
-    // Warn on slot collision
-    uint8_t my_slot = COMPUTE_MY_SLOT();
-    if (slot_num == my_slot) {
-        Serial.print("[WARN] Slot collision with node ");
-        Serial.print(neighbor_id);
-        Serial.print(" on slot ");
-        Serial.println(my_slot);
-    }
-}
 
 // =============================================================================
 // RANGING RESULTS
@@ -363,12 +343,6 @@ uint8_t NeighborTable::getEligibleCount() {
     return count;
 }
 
-float NeighborTable::getFilteredDistance(uint8_t neighbor_id) {
-    Neighbor* n = getNeighbor(neighbor_id);
-    if (n == nullptr) return -1;
-    return n->filtered_distance_cm;
-}
-
 float NeighborTable::getSuccessRate(uint8_t neighbor_id) {
     Neighbor* n = getNeighbor(neighbor_id);
     if (n == nullptr) return 0;
@@ -386,12 +360,6 @@ MeshStats NeighborTable::getStats() {
     return stats;
 }
 
-void NeighborTable::resetStats() {
-    stats.total_attempts = 0;
-    stats.total_successes = 0;
-    stats.collision_detections = 0;
-    stats.timeout_failures = 0;
-}
 
 // =============================================================================
 // PRIVATE HELPERS

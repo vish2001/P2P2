@@ -211,9 +211,7 @@ void TDMAScheduler::syncFrameStart(uint32_t new_frame_start) {
     Serial.println(" ms");
 }
 
-bool TDMAScheduler::isSynced() {
-    return synced;
-}
+
 
 uint32_t TDMAScheduler::getLastSyncTime() {
     return last_sync_ms;
@@ -238,78 +236,13 @@ void TDMAScheduler::reportCollision() {
     }
 }
 
-uint8_t TDMAScheduler::getCollisionBackoff() {
-    if (collision_count == 0) return 0;
-    
-    uint8_t backoff = COLLISION_BACKOFF_MS * collision_count;
-    return min(backoff, (uint8_t)100);
-}
-
-bool TDMAScheduler::shouldSkipSlot() {
-    return skip_next_slot;
-}
 
 // =============================================================================
 // TIMING HELPERS
 // =============================================================================
-uint32_t TDMAScheduler::timeUntilMySlot() {
-    SlotInfo info = getSlotInfo();
-    
-    if (info.is_my_slot) {
-        return 0;
-    }
-    
-    uint8_t slots_until_mine;
-    if (my_slot > info.current_slot) {
-        slots_until_mine = my_slot - info.current_slot;
-    } else {
-        slots_until_mine = NUM_SLOTS - info.current_slot + my_slot;
-    }
-    
-    return info.slot_remaining_ms + ((slots_until_mine - 1) * SLOT_LENGTH_MS);
-}
+
 
 uint16_t TDMAScheduler::getFrameNumber() {
     return frame_number;
 }
 
-uint32_t TDMAScheduler::getFrameStart() {
-    return frame_start_ms;
-}
-
-// =============================================================================
-// DEBUG
-// =============================================================================
-void TDMAScheduler::printStatus() {
-    SlotInfo info = getSlotInfo();
-    
-    Serial.println("\n=== TDMA STATUS ===");
-    Serial.print("Frame: ");
-    Serial.print(info.frame_number);
-    Serial.print(" | Length: ");
-    Serial.print(FRAME_LENGTH_MS);
-    Serial.print("ms | Synced: ");
-    Serial.println(synced ? "YES" : "NO");
-    
-    Serial.print("Current Slot: ");
-    Serial.print(info.current_slot);
-    Serial.print("/");
-    Serial.print(NUM_SLOTS - 1);
-    Serial.print(" | My Slot: ");
-    Serial.print(my_slot);
-    Serial.print(" | Is Mine: ");
-    Serial.println(info.is_my_slot ? "YES" : "NO");
-    
-    Serial.print("Slot Remaining: ");
-    Serial.print(info.slot_remaining_ms);
-    Serial.print("ms | Slot Length: ");
-    Serial.print(SLOT_LENGTH_MS);
-    Serial.println("ms");
-    
-    Serial.print("Collisions: ");
-    Serial.print(collision_count);
-    Serial.print(" | Skip Next: ");
-    Serial.println(skip_next_slot ? "YES" : "NO");
-    
-    Serial.println("===================\n");
-}
