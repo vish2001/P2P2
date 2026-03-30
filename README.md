@@ -289,12 +289,3 @@ Logs are written to `logs/<RUN>/`:
 - `node_<id>/latest.json` — most recent packet of each type (for real-time UI)
 
 ---
-
-## Known Limitations
-
-- **Classifier domain shift** — the Decision Tree was trained on open-pasture data (Morales-Vargas et al. 2025, Maquehue Farm, Chile). Field deployment in an indoor barn produced an elevated Miscellaneous rate (~36% herd average). On-site retraining with 2–4 hours of video-annotated data is recommended before long-term deployment.
-- **ESP-NOW range** — peripheral nodes beyond ~30–50 m from the base station may successfully perform UWB peer-to-peer ranging but fail to deliver classification packets to the base station. Adding a second base station at the opposite barn end resolves this.
-- **Single antenna** — the DWM3000TR13 module has a single antenna. Collar orientation changes (e.g., cow lowering head to eat) affect the UWB signal path and introduce ranging error. Per-node antenna delay calibration would reduce systematic bias.
-- **Battery life** — the current prototype runs ~8 h on a 2500 mAh LiPo. Multi-day deployment requires more aggressive duty-cycling of the ranging and telemetry subsystems.
-
----
