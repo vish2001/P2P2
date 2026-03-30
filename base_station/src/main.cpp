@@ -1,5 +1,5 @@
 // =============================================================================
-// UWB MESH BRIDGE — ESP32 Base Station Firmware
+// ESP32 Base Station Firmware
 // =============================================================================
 // Receives ESP-NOW unicast packets from mesh nodes and outputs them via:
 //   • USB Serial  (always — Pi reads /dev/ttyUSBx)
@@ -231,7 +231,8 @@ void setup() {
 }
 
 // =============================================================================
-// LOOP — drain ring buffer, forward lines
+// LOOP
+// Periodically checks WiFi connection, drains ring buffer to Serial/UDP, prints status line every STATUS_INTERVAL_MS
 // =============================================================================
 
 void loop() {

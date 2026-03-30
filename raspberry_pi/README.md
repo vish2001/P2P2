@@ -3,9 +3,9 @@
 ## Architecture
 
 ```
-[Cow 1] ──┐
-[Cow 2] ──┼── ESP-NOW ──> [ESP32 Receiver] ──Serial──> [Raspberry Pi] ──TCP──> [PC Visualizer]
-[Cow 3] ──┘                    (on RPi)                     │
+[node 1] ──┐
+[node 2] ──┼── ESP-NOW ──> [ESP32 Receiver] ──Serial──> [Raspberry Pi] ──TCP──> [PC Visualizer]
+[node 3] ──┘                    (on RPi)                     │
                                                             ▼
                                                      [CSV Log File]
 ```

@@ -3,10 +3,10 @@
 #include "peer_config.h"
 
 // =============================================================================
-// MESH NEIGHBOR TABLE
+// NEIGHBOR TABLE
 // =============================================================================
 // All nodes are equal peers. No anchors, no hierarchy.
-// Tracks neighbors for mesh connectivity and ranging.
+// Maintains a table of neighbors based on HELLO beacons and ranging results
 // =============================================================================
 
 struct Neighbor {

@@ -1,22 +1,12 @@
 // =============================================================================
-// PEER-TO-PEER UWB MESH SYSTEM + CATTLE BEHAVIOR CLASSIFIER (INTEGRATED)
+// Decentralised Social Network Analysis of Dairy Cattle Using Peer-to-Peer
+// UWB Ranging and IMU-Based Behaviour Classification
 // =============================================================================
 //
-// Combines:
+// Features:
 //   - P2P UWB mesh ranging (DS-TWR, symmetric formula)
 //   - BMI270 IMU cattle behavior classification (Decision Tree, 60 features)
 //   - ESP-NOW / WiFi UDP telemetry to base station
-//
-// IMU runs non-blocking alongside UWB loop:
-//   sampleIMU()         — every 100ms in LISTENING state only (~0.3ms)
-//   runClassification() — every 2.5s when window fills (~2ms)
-//
-// Classification packets include freshness metadata so the base station
-// knows how stale the data is:
-//   - last_range_age_ms:  time since last successful ranging
-//   - neighbor_count:     current mesh connectivity
-//   - range_success_pct:  overall ranging health
-//
 // =============================================================================
 
 #include <Arduino.h>
@@ -55,10 +45,11 @@
 uint8_t TAG_ID = 1;
 DW3000Class uwb;
 
-int ANTENNA_DELAY = ANTENNA_DELAY_DEFAULT;
+int ANTENNA_DELAY = ANTENNA_DELAY_DEFAULT; // Calibrated antenna delay for accurate ranging (in DWM3000 time units)
 int led_status    = 0;
 int destination   = 0;
 int sender        = 0;
+
 
 enum class NodeState {
     LISTENING,
@@ -71,11 +62,11 @@ enum class NodeState {
     RESP_WAIT_FINAL,
     RESP_SEND_REPORT,
     HELLO_SEND,
-};
+}; // UWB ranging state machine states
 
 NodeState state = NodeState::LISTENING;
-uint32_t  state_entry_time = 0;
-uint8_t   retry_count = 0;
+uint32_t  state_entry_time = 0; // Timestamp when we entered the current state, for timeout handling
+uint8_t   retry_count = 0; // Counts retries for ranging attempts, resets on success
 
 struct RangingSession {
     uint8_t  target_id;
@@ -93,10 +84,10 @@ struct RangingSession {
     uint32_t  t_reply_b;
     uint32_t  report_t_round_b;
     uint32_t  report_t_reply_b;
-} ranging_session;
+} ranging_session; // State for the current ranging session, used across initiator and responder states
 
-uint8_t hello_sequence_num   = 0;
-uint8_t lbt_retry_count = 0;
+uint8_t hello_sequence_num   = 0; // Counts HELLO messages sent, for neighbor table management
+uint8_t lbt_retry_count = 0; 
 
 #define BROADCAST_ID 0xFF
 
@@ -108,18 +99,18 @@ static uint32_t last_range_success_ms = 0;
 // =============================================================================
 
 BMI270 imu;
-bool imu_available = false;
+bool imu_available = false; // Flag to indicate if IMU was successfully initialized
 
-static float buf_ax[SAMPLES_PER_WIN], buf_ay[SAMPLES_PER_WIN], buf_az[SAMPLES_PER_WIN];
-static float buf_gx[SAMPLES_PER_WIN], buf_gy[SAMPLES_PER_WIN], buf_gz[SAMPLES_PER_WIN];
-static int      buf_pos   = 0;
-static int      buf_count = 0;
-static int      new_samples = 0;
-static uint32_t last_sample_ms = 0;
+static float buf_ax[SAMPLES_PER_WIN], buf_ay[SAMPLES_PER_WIN], buf_az[SAMPLES_PER_WIN]; // Circular buffer for accelerometer data
+static float buf_gx[SAMPLES_PER_WIN], buf_gy[SAMPLES_PER_WIN], buf_gz[SAMPLES_PER_WIN]; // Circular buffer for gyroscope data
+static int      buf_pos   = 0; // Current position in the circular buffer
+static int      buf_count = 0; // Number of valid samples in the buffer (max SAMPLES_PER_WIN)
+static int      new_samples = 0; // Counts new samples since last classification
+static uint32_t last_sample_ms = 0; // Timestamp of last IMU sample, for sampling rate control
 
 static CattleVoter behaviour_voter;
-static int   current_behavior   = -1;
-static int   current_confidence = 0;
+static int   current_behavior   = -1; // Current classified behavior (0-3 for primary classes, -1 for unclassified)
+static int   current_confidence = 0; // Confidence in current behavior (number of votes in behavior voter history)
 static float latest_ax = 0, latest_ay = 0, latest_az = 0;
 static float latest_gx = 0, latest_gy = 0, latest_gz = 0;
 
@@ -127,11 +118,11 @@ static float latest_gx = 0, latest_gy = 0, latest_gz = 0;
 // =============================================================================
 // FORWARD DECLARATIONS
 // =============================================================================
-void initializeUWB();
-void initializeIMU();
+void initializeUWB(); // Initializes DW3000 UWB module with settings and antenna delay calibration
+void initializeIMU(); // Initializes BMI270 IMU, checks availability, and runs classifier self-test
 
-void hardResetUWB();
-void generateNodeID();
+void hardResetUWB(); // Performs a hard reset of the DW3000 module by toggling the RST pin, used for recovery from error states
+void generateNodeID(); 
 bool performLBT();
 bool checkStateTimeout(uint32_t timeout_ms);
 void transitionTo(NodeState new_state);
@@ -158,6 +149,7 @@ void printStatus();
 // =============================================================================
 // AUTO-ADDRESSING FROM MAC
 // =============================================================================
+// Generates a unique node ID from ESP32 MAC address or override, and updates TDMA slot
 void generateNodeID() {
 #if TAG_ID_OVERRIDE > 0
     TAG_ID = TAG_ID_OVERRIDE;
@@ -166,6 +158,7 @@ void generateNodeID() {
 #else
     uint64_t mac = ESP.getEfuseMac();
     Serial.print("[MAC] ");
+    // Print MAC in standard format
     for (int i = 0; i < 6; i++) {
         uint8_t byte = (mac >> (i * 8)) & 0xFF;
         if (byte < 0x10) Serial.print("0");
@@ -173,19 +166,20 @@ void generateNodeID() {
         if (i < 5) Serial.print(":");
     }
     Serial.println();
+    // FNV-1a hash of MAC to 1-253 range for TAG_ID
     uint32_t hash = 2166136261;
     for (int i = 0; i < 6; i++) {
         uint8_t byte = (mac >> (i * 8)) & 0xFF;
         hash ^= byte;
         hash *= 16777619;
     }
-    TAG_ID = (hash % 253) + 1;
+    TAG_ID = (hash % 253) + 1; // Map to 1-253
     Serial.print("[ID] Auto-generated: ");
     Serial.println(TAG_ID);
 #endif
-  scheduler.recalculateSlot();
+  scheduler.recalculateSlot(); // Update TDMA slot based on new TAG_ID
   Serial.print("[SLOT] ");
-  Serial.print(scheduler.getMySlot());
+  Serial.print(scheduler.getMySlot()); 
   Serial.print("/");
   Serial.println(NUM_SLOTS - 1);
 }
@@ -193,6 +187,7 @@ void generateNodeID() {
 // =============================================================================
 // IMU INITIALIZATION
 // =============================================================================
+// Initializes BMI270 IMU, checks availability, and runs classifier self-test
 void initializeIMU() {
     Serial.println("[IMU] Initializing BMI270...");
     Wire.begin(IMU_SDA_PIN, IMU_SCL_PIN);
@@ -202,57 +197,59 @@ void initializeIMU() {
         imu_available = true;
         Serial.println("[IMU] BMI270 OK");
 
-        int pass = cc_selftest();
-        Serial.printf("[IMU] Classifier self-test: %d/4 (MLP primary)\n", pass);
+        int pass = cc_selftest(); // Self-test runs the feature extraction and Decision Tree classification on 4 fixed test vectors, checks against expected classes
+        Serial.printf("[IMU] Classifier self-test: %d/4 (Decision Tree primary)\n", pass);
 
-        imu.getSensorData();
+        imu.getSensorData(); // Read initial IMU sensor data to display current Z-axis acceleration for verification
         Serial.printf("[IMU] az = %.2f m/s2\n", imu.data.accelZ * G_TO_MS2);
     } else {
         imu_available = false;
         Serial.println("[IMU] BMI270 not found — classification disabled, UWB continues");
     }
-    cc_voter_init(&behaviour_voter);
+    cc_voter_init(&behaviour_voter); // Initialize the CattleVoter structure to smooth behavior classifications over multiple predictions for stability
 }
 
 // =============================================================================
 // IMU SAMPLING — non-blocking, LISTENING state only
-// I2C read takes ~300-500us. Gated to LISTENING to avoid corrupting
-// DW3000 SPI timestamps during active DS-TWR exchanges.
 // =============================================================================
+// Samples IMU data non-blockingly during LISTENING state, buffers for classification
 void sampleIMU() {
     if (!imu_available) return;
     uint32_t now = millis();
     if (now - last_sample_ms < SAMPLE_INTERVAL) return;
     last_sample_ms = now;
 
-    imu.getSensorData();
-
+    imu.getSensorData(); // Read latest sensor data from BMI270
+    
+    // Convert raw IMU data to physical units (m/s^2 for accel, deg/s for gyro)
     float ax = imu.data.accelX * G_TO_MS2;
     float ay = imu.data.accelY * G_TO_MS2;
     float az = imu.data.accelZ * G_TO_MS2;
     float gx = imu.data.gyroX;
     float gy = imu.data.gyroY;
     float gz = imu.data.gyroZ;
-
+    
+    // Update latest IMU readings for telemetry, and add to circular buffer for classification
     latest_ax = ax; latest_ay = ay; latest_az = az;
     latest_gx = gx; latest_gy = gy; latest_gz = gz;
 
     buf_ax[buf_pos] = ax; buf_ay[buf_pos] = ay; buf_az[buf_pos] = az;
     buf_gx[buf_pos] = gx; buf_gy[buf_pos] = gy; buf_gz[buf_pos] = gz;
-    buf_pos = (buf_pos + 1) % SAMPLES_PER_WIN;
-    if (buf_count < SAMPLES_PER_WIN) buf_count++;
+    buf_pos = (buf_pos + 1) % SAMPLES_PER_WIN; // Move buffer position forward, wrap around if needed
+    if (buf_count < SAMPLES_PER_WIN) buf_count++; // Increment count of valid samples in buffer, up to the max window size
     new_samples++;
 
     if (buf_count >= SAMPLES_PER_WIN && new_samples >= OVERLAP_SAMPLES) {
-        runClassification();
-        new_samples = 0;
+        runClassification(); // Run classification on the buffered IMU data once we have enough samples for a full window and have reached the overlap threshold
+        new_samples = 0; // Reset new samples count after classification 
     }
 }
 
 // =============================================================================
-// CLASSIFICATION — fires every ~2.5s, takes ~2ms
+// CLASSIFICATION — fires every ~2.5s
 // Sends C packet with behavior + staleness metadata.
 // =============================================================================
+// Runs cattle behavior classification on buffered IMU data, sends results via telemetry
 void runClassification() {
     float win_ax[SAMPLES_PER_WIN], win_ay[SAMPLES_PER_WIN], win_az[SAMPLES_PER_WIN];
     float win_gx[SAMPLES_PER_WIN], win_gy[SAMPLES_PER_WIN], win_gz[SAMPLES_PER_WIN];
@@ -263,7 +260,7 @@ void runClassification() {
         win_gx[i] = buf_gx[idx]; win_gy[i] = buf_gy[idx]; win_gz[i] = buf_gz[idx];
     }
 
-    // cc_classify handles: extract → select → scale → MLP → behaviour_voter
+    // cc_classify handles: extract → select → scale → Decision Tree → behaviour_voter
     int raw_pred = -1;
     int smoothed = cc_classify(win_ax, win_ay, win_az,
                                win_gx, win_gy, win_gz,
@@ -310,15 +307,14 @@ void runClassification() {
 
 // =============================================================================
 // SETUP
+// Initializes serial, generates ID, sets up IMU/UWB, enters listening mode
 // =============================================================================
 void setup() {
     Serial.begin(SERIAL_BAUD);
     delay(200);
 
     Serial.println("\n==========================================");
-    Serial.println("  P2P UWB MESH + CATTLE CLASSIFIER v2");
-    Serial.println("  DS-TWR: symmetric formula");
-    Serial.println("  Model:  MLP (F1=0.93, 39 features)");
+    Serial.println("  P2P UWB RANGING + CATTLE CLASSIFIER v2.0");
     Serial.println("==========================================");
 
     generateNodeID();
@@ -338,7 +334,7 @@ void setup() {
     Serial.end();     // silent after this point
 #endif
 
-    randomSeed(TAG_ID * 1000 + millis());
+    randomSeed(TAG_ID * 1000 + millis()); // Seed random number generator with a combination of TAG_ID and current time for any randomized operations (e.g. LBT backoff)
 
 #if ESP_NOW_ENABLED
     espnowSender.begin();
@@ -352,23 +348,25 @@ void setup() {
     initializeIMU();
     initializeUWB();
 
-    enterListeningMode();
+    enterListeningMode(); // Start in listening mode, waiting for HELLO/POLL messages to initiate ranging
     last_sample_ms = millis();
 }
 
 // =============================================================================
 // BROADCAST NEIGHBOR TABLE
+// Broadcasts neighbor table and heartbeat via ESP-NOW or WiFi
 // =============================================================================
 void broadcastNeighborTable() {
-    uint8_t count = neighborTable.getActiveCount();
+    uint8_t count = neighborTable.getActiveCount(); // Count active neighbors for telemetry
 
 #if ESP_NOW_ENABLED
-    espnowSender.sendHeartbeat(TAG_ID, scheduler.getFrameNumber(), count, millis());
+    espnowSender.sendHeartbeat(TAG_ID, scheduler.getFrameNumber(), count, millis()); // Send heartbeat with current frame number and neighbor count for monitoring connectivity and network health
 #elif WIFI_ENABLED
     wifiSender.sendHeartbeat(TAG_ID, scheduler.getFrameNumber(), count, millis());
 #endif
 
-    const Neighbor* neighbors = neighborTable.getNeighborArray();
+    const Neighbor* neighbors = neighborTable.getNeighborArray(); // Get pointer to neighbor array for iteration
+    
 
     for (uint8_t i = 0; i < MAX_NEIGHBORS; i++) {
         const Neighbor& n = neighbors[i];
@@ -388,7 +386,7 @@ void broadcastNeighborTable() {
             TAG_ID, n.id, n.hello_count, range_pct,
             n.filtered_distance_cm, n.avg_rssi,
             is_stale, stale_ms
-        );
+        ); // Send neighbor info including ranging success rate, filtered distance, average RSSI, and staleness indicators for monitoring link quality and neighbor status in the mesh network
 #elif WIFI_ENABLED
         wifiSender.sendNeighborInfo(
             TAG_ID, n.id, n.hello_count, range_pct,
@@ -402,6 +400,7 @@ void broadcastNeighborTable() {
 
 // =============================================================================
 // MAIN LOOP
+// Main loop: handles comms checks, IMU sampling, UWB state machine, periodic tasks
 // =============================================================================
 void loop() {
     // Periodic comms health check
@@ -476,7 +475,7 @@ bool performLBT() {
     uwb.clearSystemStatus();
     uwb.standardRX();
     uint32_t start = millis();
-    while (millis() - start < LBT_LISTEN_MS) {
+    while (millis() - start < LBT_LISTEN_MS) { // Listen for a short period to check if the channel is busy before transmitting
         if (uwb.receivedFrameSucc() == 1) {
             uwb.clearSystemStatus();
             return false;
@@ -491,6 +490,7 @@ bool performLBT() { return true; }
 
 // =============================================================================
 // LISTENING STATE
+// Handles LISTENING state: checks for HELLO/POLL messages, initiates ranging
 // =============================================================================
 void handleListeningState() {
     if (scheduler.shouldSendHello()) {
@@ -505,8 +505,8 @@ void handleListeningState() {
         if ((range_frame_counter % RANGE_EVERY_N_FRAMES) == 0) {
             uint8_t target = neighborTable.getNextRangingTarget();
             if (target != 0) {
-                ranging_session.target_id    = target;
-                ranging_session.is_initiator = true;
+                ranging_session.target_id    = target; // Set target ID for ranging session
+                ranging_session.is_initiator = true; // This node will be the initiator in the ranging exchange
                 retry_count          = 0;
                 lbt_retry_count          = 0;
                 Serial.print("[RANGE] -> ");
@@ -541,7 +541,7 @@ void handleListeningState() {
                     Serial.println("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
                 }
 
-#if SYNC_TO_LOWER_ID
+#if SYNC_TO_LOWER_ID  // If the sender has a lower ID, we can assume they are earlier in the TDMA schedule and sync to their frame start for better timing alignment in the mesh. 
                 if (sender_id < TAG_ID) {
                     uint8_t s_slot = sender_id % NUM_SLOTS;
                     uint32_t now = millis();
@@ -578,6 +578,7 @@ void handleListeningState() {
 
 // =============================================================================
 // INITIATOR STATES
+// Initiator: Sends POLL message after LBT, transitions to wait for response
 // =============================================================================
 void handleInitSendPoll() {
     if (scheduler.shouldAddJitter()) {
@@ -608,6 +609,7 @@ void handleInitSendPoll() {
     transitionTo(NodeState::INIT_WAIT_RESP);
 }
 
+// Initiator: Waits for RESP message, handles timeout/retry
 void handleInitWaitResp() {
     if (checkStateTimeout(RESPONSE_TIMEOUT_MS)) {
         retry_count++;
@@ -639,8 +641,10 @@ void handleInitWaitResp() {
         uwb.clearSystemStatus();
         uwb.standardRX();
     }
+// Initiator: Sends FINAL message, calculates reply time
 }
 
+// Initiator: Sends FINAL message, calculates reply time
 void handleInitSendFinal() {
     uwb.setSenderID(TAG_ID);
     uwb.setDestinationID(ranging_session.target_id);
@@ -648,8 +652,10 @@ void handleInitSendFinal() {
     ranging_session.tx_final  = uwb.readTXTimestamp();
     ranging_session.t_reply_a = ranging_session.tx_final - ranging_session.rx_resp;
     transitionTo(NodeState::INIT_WAIT_REPORT);
+
 }
 
+// Initiator: Waits for REPORT message, handles timeout, extracts timing info for distance calculation
 void handleInitWaitReport() {
     if (checkStateTimeout(RESPONSE_TIMEOUT_MS)) {
         LOG_RANGE_FAILURE(TAG_ID, ranging_session.target_id, scheduler.getFrameNumber(), "REPORT_TIMEOUT");
@@ -676,9 +682,11 @@ void handleInitWaitReport() {
     } else if (rx == 2) {
         uwb.clearSystemStatus();
         uwb.standardRX();
+
     }
 }
 
+// Initiator: Calculates distance from timing info, logs result, updates neighbor table, sends telemetry, returns to listening mode
 void handleInitCalculate() {
     int ranging_time = uwb.ds_processRTInfo(
         ranging_session.t_round_a, ranging_session.t_reply_a,
@@ -720,18 +728,23 @@ void handleInitCalculate() {
     enterListeningMode();
 }
 
+
 // =============================================================================
 // RESPONDER STATES
 // =============================================================================
+
+// Responder: Sends RESP message, calculates reply time
 void handleRespSendResp() {
     uwb.setSenderID(TAG_ID);
     uwb.setDestinationID(ranging_session.target_id);
     uwb.ds_sendFrame(STAGE_RESP);
     ranging_session.tx_resp   = uwb.readTXTimestamp();
+// Responder: Waits for FINAL message, handles timeout
     ranging_session.t_reply_b = ranging_session.tx_resp - ranging_session.rx_poll;
     transitionTo(NodeState::RESP_WAIT_FINAL);
 }
 
+// Responder: Waits for FINAL message, handles timeout, extracts timing info for distance calculation
 void handleRespWaitFinal() {
     if (checkStateTimeout(RESPONSE_TIMEOUT_MS)) {
         scheduler.exitRespondingMode();
@@ -755,10 +768,12 @@ void handleRespWaitFinal() {
         }
     } else if (rx == 2) {
         uwb.clearSystemStatus();
+// Responder: Sends REPORT with timing info, exits responding mode
         uwb.standardRX();
     }
 }
 
+// Responder: Sends REPORT with timing info, exits responding mode
 void handleRespSendReport() {
     uwb.setSenderID(TAG_ID);
     uwb.setDestinationID(ranging_session.target_id);
@@ -770,6 +785,8 @@ void handleRespSendReport() {
 // =============================================================================
 // HELLO BEACON
 // =============================================================================
+
+// Handles HELLO beacon transmission: sends broadcast HELLO, updates neighbor table, returns to listening mode
 void handleHelloSend() {
     delay(random(0, 50));
     uwb.clearSystemStatus();
@@ -783,16 +800,20 @@ void handleHelloSend() {
     }
     hello_sequence_num++;
     enterListeningMode();
+
 }
 
 // =============================================================================
-// HELPERS
+// HELPER FUNCTIONS
 // =============================================================================
+
+// Transitions to a new state, records entry time for timeout handling
 void transitionTo(NodeState new_state) {
     state            = new_state;
     state_entry_time = millis();
 }
 
+// Checks if the current state has exceeded the specified timeout duration
 bool checkStateTimeout(uint32_t timeout_ms) {
     return (millis() - state_entry_time) > timeout_ms;
 }
@@ -804,6 +825,7 @@ void enterListeningMode() {
     uwb.standardRX();
     if (REDUCE_CPU_FREQ) {
         setCpuFrequencyMhz(CPU_FREQ_NORMAL);
+// Initializes DW3000 UWB module, performs reset and configuration
     }
 }
 
@@ -846,19 +868,21 @@ void initializeUWB() {
 }
 
 
-void hardResetUWB() {
+void hardResetUWB() { // Performs a hard reset of the DW3000 module by toggling the RST pin, used for recovery from error states
     pinMode(PIN_RST, OUTPUT);
     digitalWrite(PIN_RST, LOW);
     delay(3);
     digitalWrite(PIN_RST, HIGH);
     delay(5);
+// Prints current node status, neighbors, ranging stats, IMU data
+// Prints current node status, neighbors, ranging stats, IMU data
 }
 
 // =============================================================================
 // STATUS
 // =============================================================================
 void printStatus() {
-    Serial.println("\n======== MESH NODE + IMU v2 ========");
+    Serial.println("\n======== STARTING ========");
     Serial.print("ID: ");        Serial.print(TAG_ID);
     Serial.print(" | Slot: ");   Serial.print(scheduler.getMySlot());
     Serial.print("/");           Serial.print(NUM_SLOTS - 1);

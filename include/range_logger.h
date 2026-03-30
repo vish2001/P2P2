@@ -76,5 +76,3 @@ extern RangeLogger rangeLogger;
 #define LOG_RANGE_SUCCESS(init, resp, dist, rssi, fp, frame) rangeLogger.logSuccess(init, resp, dist, rssi, fp, frame)
 
 #define LOG_RANGE_FAILURE(init, resp, frame, reason) rangeLogger.logFailure(init, resp, frame, reason)
-
-#define LOG_HELLO(sender, seq) rangeLogger.logHello(sender, seq)

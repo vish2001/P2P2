@@ -9,6 +9,11 @@
 #include <esp_wifi.h>
 #include <WiFi.h>
 
+// =============================================================================
+// ESP-NOW SENDER
+// Handles ESP-NOW initialization, connection management, and packet formatting/sending for ranging results
+// =============================================================================
+
 class ESPNowSender {
 public:
     ESPNowSender();

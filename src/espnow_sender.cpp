@@ -9,6 +9,7 @@ static const uint8_t BROADCAST_MAC[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 static volatile uint32_t _send_success = 0;
 static volatile uint32_t _send_fail    = 0;
 
+// Constructor: Initializes ESP-NOW sender with broadcast MAC and default state
 ESPNowSender::ESPNowSender() {
     initialized    = false;
     last_send_time = 0;
@@ -17,6 +18,7 @@ ESPNowSender::ESPNowSender() {
     memcpy(base_mac, BROADCAST_MAC, 6);
 }
 
+// Initializes ESP-NOW in broadcast mode for telemetry to base stations
 bool ESPNowSender::begin() {
     Serial.println("[ESP-NOW] Initializing (broadcast mode)...");
 
@@ -53,10 +55,12 @@ bool ESPNowSender::begin() {
     return true;
 }
 
+// Checks if ESP-NOW is initialized and connected
 bool ESPNowSender::isConnected() {
     return initialized;
 }
 
+// Re-initializes ESP-NOW if not connected (for recovery)
 void ESPNowSender::checkConnection() {
     if (!initialized) begin();
 }
@@ -65,7 +69,7 @@ void ESPNowSender::checkConnection() {
 // SEND METHODS
 // All respect ESP_NOW_MIN_INTERVAL rate limiter to avoid flooding.
 // =============================================================================
-
+// Sends ranging result telemetry packet
 void ESPNowSender::sendRangingResult(uint8_t from_id, uint8_t to_id,
                                       float distance_cm, float rssi,
                                       uint32_t timestamp) {
@@ -78,6 +82,7 @@ void ESPNowSender::sendRangingResult(uint8_t from_id, uint8_t to_id,
     sendPacket(buf);
 }
 
+// Sends neighbor information telemetry packet
 void ESPNowSender::sendNeighborInfo(uint8_t node_id, uint8_t neighbor_id,
                                      uint8_t hello_count, uint8_t range_pct,
                                      float distance_cm, float rssi,
@@ -92,6 +97,7 @@ void ESPNowSender::sendNeighborInfo(uint8_t node_id, uint8_t neighbor_id,
     sendPacket(buf);
 }
 
+// Sends heartbeat telemetry packet with node status
 void ESPNowSender::sendHeartbeat(uint8_t node_id, uint32_t frame_num,
                                   uint8_t neighbor_count, uint32_t uptime_ms) {
     if (!initialized) return;
@@ -103,6 +109,7 @@ void ESPNowSender::sendHeartbeat(uint8_t node_id, uint32_t frame_num,
     sendPacket(buf);
 }
 
+// Sends IMU behavior classification telemetry packet with metadata
 void ESPNowSender::sendIMUClassification(uint8_t node_id, int behavior,
                                           int confidence,
                                           float ax, float ay, float az,
@@ -124,6 +131,7 @@ void ESPNowSender::sendIMUClassification(uint8_t node_id, int behavior,
 }
 
 // =============================================================================
+// Sends a packet via ESP-NOW broadcast, handles success/failure tracking
 // INTERNAL SEND
 // =============================================================================
 void ESPNowSender::sendPacket(const char* data) {
@@ -142,8 +150,10 @@ void ESPNowSender::sendPacket(const char* data) {
             Serial.println(result);
         }
     }
+// ESP-NOW send callback: Tracks success/failure counts
 }
 
+// Callback function for ESP-NOW send status, updates success/failure counters
 void ESPNowSender::onSent(const uint8_t* mac, esp_now_send_status_t status) {
     if (status == ESP_NOW_SEND_SUCCESS) {
         _send_success++;

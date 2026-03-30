@@ -40,17 +40,19 @@ NeighborTable::NeighborTable() {
 // =============================================================================
 // HELLO PROCESSING
 // =============================================================================
+
+// Processes a received HELLO message: updates neighbor table with new/existing neighbor, tracks HELLO count and recency for eligibility and target selection
 void NeighborTable::processHello(uint8_t neighbor_id, uint8_t seq_num, uint8_t neighbor_count) {
     if (neighbor_id == TAG_ID) return;
     
-    Neighbor* n = findOrCreate(neighbor_id);
+    Neighbor* n = findOrCreate(neighbor_id); // Find existing neighbor or create new entry for this neighbor ID
     if (n == nullptr) {
-        Serial.println("[MESH] Neighbor table full");
+        Serial.println("Neighbor table full");
         return;
     }
     
-    n->last_hello_time = millis();
-    n->hello_count++;
+    n->last_hello_time = millis(); // Update last HELLO time for staleness tracking
+    n->hello_count++; // Increment HELLO count for eligibility and neighbor status monitoring
     
     if (DEBUG_OUTPUT) {
         Serial.print("[HELLO] Node ");
@@ -65,6 +67,8 @@ void NeighborTable::processHello(uint8_t neighbor_id, uint8_t seq_num, uint8_t n
 // =============================================================================
 // RANGING RESULTS
 // =============================================================================
+
+// Records a successful ranging result: updates neighbor entry with new distance and RSSI, applies filtering, updates long-range status, and tracks stats for performance monitoring
 void NeighborTable::recordRangingSuccess(uint8_t neighbor_id, float distance_cm, float rssi) {
     Neighbor* n = getNeighbor(neighbor_id);
     if (n == nullptr) return;
@@ -113,6 +117,7 @@ void NeighborTable::recordRangingSuccess(uint8_t neighbor_id, float distance_cm,
     n->is_long_range = isLongRange(*n);
 }
 
+// Records a ranging failure: updates neighbor entry with failure count and tracks stats for performance monitoring
 void NeighborTable::recordRangingFailure(uint8_t neighbor_id) {
     Neighbor* n = getNeighbor(neighbor_id);
     if (n == nullptr) return;
@@ -123,6 +128,7 @@ void NeighborTable::recordRangingFailure(uint8_t neighbor_id) {
     stats.timeout_failures++;
 }
 
+// Records a detected collision: updates neighbor entry with failure count and tracks stats for performance monitoring
 void NeighborTable::recordCollision(uint8_t neighbor_id) {
     stats.collision_detections++;
     Neighbor* n = getNeighbor(neighbor_id);
@@ -131,17 +137,12 @@ void NeighborTable::recordCollision(uint8_t neighbor_id) {
     }
 }
 
-// =============================================================================
-// TARGET SELECTION - MESH CONNECTIVITY
-// =============================================================================
-// This is the KEY function for maintaining mesh connectivity.
-// Strategy: Round-robin through ALL neighbors, but prioritize:
-// 1. Stale long-range links (critical for mesh)
-// 2. Any stale links
-// 3. Normal round-robin
-// =============================================================================
+
+
+// Maintains mesh connectivity by selecting the next neighbor to range with based on a priority system:
+// 1. Stale long-range links (critical for mesh bridges), 2. Any stale links, 3. Round-robin among active neighbors
 uint8_t NeighborTable::getNextRangingTarget() {
-    pruneStaleNeighbors();
+    pruneStaleNeighbors(); // Clean up stale neighbors before selection
     
     // Collect eligible neighbors
     struct Candidate {
@@ -241,36 +242,39 @@ uint8_t NeighborTable::getNextRangingTarget() {
 float NeighborTable::calculatePriority(const Neighbor& n) {
     float score = 0.0;
     
-    // Recency of HELLO
+    // Recency of HELLO: exponential decay over 5 seconds, gives 1.0 for very recent, ~0.135 for 5s old, ~0.007 for 10s old
+    // Multiplied by 25.0: recent neighbors get up to 25 priority points
     uint32_t hello_age = millis() - n.last_hello_time;
     float recency = exp(-((float)hello_age / 5000.0));
     score += recency * 25.0;
     
-    // Success rate
+    // Success rate: 0.5 (default for new neighbors) to 1.0 (perfect success)
+    // Multiplied by 20.0: reliable neighbors get up to 20 priority points
     float success_rate = 0.5;
     if (n.ranging_attempts > 0) {
         success_rate = (float)n.ranging_successes / (float)n.ranging_attempts;
     }
     score += success_rate * 20.0;
     
-    // STALE LINK BOOST - critical for mesh maintenance
+    // STALE LINK BOOST - critical for mesh maintenance: adds fixed priority to revive inactive links
     if (isLinkStale(n)) {
         score += STALE_LINK_PRIORITY;
     }
     
-    // LONG RANGE BOOST - these are mesh bridge links
+    // LONG RANGE BOOST - these are mesh bridge links: adds priority to maintain connectivity across clusters
     if (n.is_long_range) {
         score += BRIDGE_LINK_PRIORITY_BOOST;
     }
     
-    // Signal quality
+    // Signal quality: RSSI from -100 (worst) to 0 (best), normalized to 0-2 scale
+    // Multiplied by 10.0: good signal neighbors get up to 20 priority points
     if (n.avg_rssi > -100) {
-        float rssi_score = (n.avg_rssi + 100) / 50.0;
+        float rssi_score = (n.avg_rssi + 100) / 50.0;  // -100 -> 0, 0 -> 2
         rssi_score = constrain(rssi_score, 0.0f, 2.0f);
         score += rssi_score * 10.0;
     }
     
-    // Penalize failures
+    // Penalize failures: subtract 5 points per consecutive failure to avoid repeatedly trying bad links
     if (n.consecutive_failures > 0) {
         score -= n.consecutive_failures * 5.0;
     }
@@ -364,6 +368,8 @@ MeshStats NeighborTable::getStats() {
 // =============================================================================
 // PRIVATE HELPERS
 // =============================================================================
+
+// Finds existing neighbor entry or creates a new one if space available, initializing all fields
 Neighbor* NeighborTable::findOrCreate(uint8_t neighbor_id) {
     // Look for existing
     for (int i = 0; i < MAX_NEIGHBORS; i++) {
@@ -407,6 +413,7 @@ Neighbor* NeighborTable::findOrCreate(uint8_t neighbor_id) {
     return nullptr;
 }
 
+// Updates neighbor's distance history with median filtering and exponential moving average for stable distance estimates
 void NeighborTable::updateDistance(Neighbor& n, float new_distance) {
     if (!isValidDistance(new_distance)) return;
     
@@ -439,10 +446,12 @@ void NeighborTable::updateDistance(Neighbor& n, float new_distance) {
     }
 }
 
+// Checks if distance measurement falls within acceptable bounds for filtering
 bool NeighborTable::isValidDistance(float distance) {
     return (distance >= MIN_DISTANCE_CM && distance <= MAX_DISTANCE_CM);
 }
 
+// Computes median value from array using bubble sort for robust distance estimation
 float NeighborTable::calculateMedian(float* arr, int size) {
     if (size == 0) return 0;
     if (size == 1) return arr[0];

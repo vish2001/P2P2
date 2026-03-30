@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # =============================================================================
-# UWB MESH LOGGER (Raspberry Pi) — per-node CSVs + wall-clock timestamps
+# (Raspberry Pi) — per-node CSVs + wall-clock timestamps
 # =============================================================================
 # Supports two input formats:
 #  1) Bridge CSV:
